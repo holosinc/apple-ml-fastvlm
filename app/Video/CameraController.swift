@@ -5,8 +5,10 @@
 
 import AVFoundation
 import CoreImage
+#if os(visionOS)
 import ARKit
 import RealityKit
+#endif
 #if os(iOS)
     import UIKit
 #endif
