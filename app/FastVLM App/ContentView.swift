@@ -99,7 +99,7 @@ struct ContentView: View {
                                             .padding(.top)
                                     }
                                 }
-                                #if !os(macOS)
+                                #if os(iOS)
                                 .overlay(alignment: .topTrailing) {
                                     CameraControlsView(
                                         backCamera: $camera.backCamera,
@@ -204,7 +204,7 @@ struct ContentView: View {
                 await model.load()
             }
 
-            #if !os(macOS)
+            #if os(iOS)
             .onAppear {
                 // Prevent the screen from dimming or sleeping due to inactivity
                 UIApplication.shared.isIdleTimerDisabled = true
@@ -274,9 +274,11 @@ struct ContentView: View {
                     }
                 }
             }
+            #if !os(visionOs)
             .sheet(isPresented: $isShowingInfo) {
                 InfoView()
             }
+            #endif
         }
     }
 

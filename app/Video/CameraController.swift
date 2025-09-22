@@ -5,13 +5,24 @@
 
 import AVFoundation
 import CoreImage
-
+import ARKit
+import RealityKit
 #if os(iOS)
     import UIKit
 #endif
 
+#if os(visionOS)
+@available(visionOS 2.1, *)
+#endif
 @Observable
 public class CameraController: NSObject {
+    
+    #if os(visionOS)
+    private var arkitSession: ARKitSession?
+    private var cameraFrameProvider: CameraFrameProvider?
+    private var visionStreamingTask: Task<Void, Never>?
+    #endif
+
 
     private var framesContinuation: AsyncStream<CMSampleBuffer>.Continuation?
 
@@ -34,7 +45,9 @@ public class CameraController: NSObject {
     private var permissionGranted = true
     private var captureSession: AVCaptureSession?
     private let sessionQueue = DispatchQueue(label: "sessionQueue")
+    #if !os(visionOS)
     @objc dynamic private var rotationCoordinator : AVCaptureDevice.RotationCoordinator?
+    #endif
     private var rotationObservation: NSKeyValueObservation?
 
     public func attach(continuation: AsyncStream<CMSampleBuffer>.Continuation) {
@@ -50,14 +63,19 @@ public class CameraController: NSObject {
     }
 
     public func stop() {
+        #if os(visionOS)
+            stopVisionOS()
+        #endif
         sessionQueue.sync { [self] in
             captureSession?.stopRunning()
             captureSession = nil
         }
-
     }
 
     public func start() {
+        #if os(visionOS)
+            startVisionOS()
+        #else
         sessionQueue.async { [self] in
             let captureSession = AVCaptureSession()
             self.captureSession = captureSession
@@ -66,6 +84,7 @@ public class CameraController: NSObject {
             self.setupCaptureSession(position: backCamera ? .back : .front)
             captureSession.startRunning()
         }
+        #endif
     }
 
     #if os(iOS)
@@ -139,8 +158,10 @@ public class CameraController: NSObject {
         let deviceTypes: [AVCaptureDevice.DeviceType]
         #if os(iOS)
             deviceTypes = [.builtInDualCamera, .builtInWideAngleCamera]
-        #else
-            deviceTypes = [.external, .continuityCamera, .builtInWideAngleCamera]
+        #elseif os(visionOS)
+            deviceTypes = [.builtInWideAngleCamera, .external]
+        #elseif os(macOS)
+            deviceTypes = [.continuityCamera, .external, .builtInWideAngleCamera]
         #endif
 
         let videoDeviceDiscoverySession = AVCaptureDevice.DiscoverySession(
@@ -177,8 +198,9 @@ public class CameraController: NSObject {
 
         videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "sampleBufferQueue"))
         captureSession.addOutput(videoOutput)
+        #if !os(visionOS)
         captureSession.sessionPreset = AVCaptureSession.Preset.hd1920x1080
-
+        #endif
         #if os(iOS)
         rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: videoDevice, previewLayer: nil)
         rotationObservation = observe(\.rotationCoordinator!.videoRotationAngleForHorizonLevelCapture, options: [.initial, .new]) { [weak self] _, change in
@@ -188,8 +210,86 @@ public class CameraController: NSObject {
         }
         #endif
     }
+    #if os(visionOS)
+    private func startVisionOS() {
+        stopVisionOS()
+
+        guard CameraFrameProvider.isSupported else {
+            print("CameraFrameProvider is not supported on this device/config.")
+            return
+        }
+
+        let session = ARKitSession()
+        let provider = CameraFrameProvider()
+        self.arkitSession = session
+        self.cameraFrameProvider = provider
+
+        visionStreamingTask = Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            do {
+                try await session.run([provider])
+                let formats = CameraVideoFormat.supportedVideoFormats(for: .main, cameraPositions: [.left])
+                guard let highRes = formats.max(by: { $0.frameSize.height < $1.frameSize.height }),
+                      let updates = provider.cameraFrameUpdates(for: highRes)
+                else {
+                    print("No supported camera format/updates.")
+                    return
+                }
+
+                for await frame in updates {
+                    if let sample = frame.sample(for: .left) {
+                        let pixelBuffer = sample.pixelBuffer
+
+                        let ts = CMTime(seconds: sample.parameters.captureTimestamp, preferredTimescale: 1_000_000)
+                        if let cms = Self.cmsampleBuffer(from: pixelBuffer, timestamp: ts) {
+                            self.sessionQueue.async { [weak self] in
+                                self?.framesContinuation?.yield(cms)
+                            }
+                        }
+                    }
+                }
+
+            } catch {
+                print("ARKitSession run error: \(error)")
+            }
+        }
+    }
+
+    private func stopVisionOS() {
+        visionStreamingTask?.cancel()
+        visionStreamingTask = nil
+        arkitSession = nil
+        cameraFrameProvider = nil
+    }
+    
+    private static func cmsampleBuffer(from pixelBuffer: CVPixelBuffer, timestamp: CMTime) -> CMSampleBuffer? {
+        var videoInfo: CMVideoFormatDescription?
+        let status1 = CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+                                                                   imageBuffer: pixelBuffer,
+                                                                   formatDescriptionOut: &videoInfo)
+        guard status1 == noErr, let videoInfo else { return nil }
+
+        var timing = CMSampleTimingInfo(duration: CMTime.invalid,
+                                        presentationTimeStamp: timestamp,
+                                        decodeTimeStamp: CMTime.invalid)
+
+        var sampleBuffer: CMSampleBuffer?
+        let status2 = CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault,
+                                                         imageBuffer: pixelBuffer,
+                                                         dataReady: true,
+                                                         makeDataReadyCallback: nil,
+                                                         refcon: nil,
+                                                         formatDescription: videoInfo,
+                                                         sampleTiming: &timing,
+                                                         sampleBufferOut: &sampleBuffer)
+
+        guard status2 == noErr, let sampleBuffer else { return nil }
+        return sampleBuffer
+    }
+    #endif
 }
 
+@available(visionOS 2.1, *)
 extension CameraController: AVCaptureVideoDataOutputSampleBufferDelegate {
     public func captureOutput(
         _ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,

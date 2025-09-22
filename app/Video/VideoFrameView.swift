@@ -7,6 +7,9 @@ import AVFoundation
 import CoreImage
 import Foundation
 import SwiftUI
+#if os(iOS) || os(visionOS)
+import UIKit
+#endif
 
 /// Displays a stream of video frames
 public struct VideoFrameView: View {
@@ -110,7 +113,7 @@ public struct VideoFrameView: View {
     }
 }
 
-#if os(iOS)
+#if os(iOS) || os(visionOS)
     /// Internal view to display a CVImageBuffer
     private struct _ImageView: UIViewRepresentable {
 
